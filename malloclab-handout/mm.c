@@ -70,6 +70,16 @@ team_t team = {
 #define FREE_BLOCK_PRED(bp) ((char *)(bp))
 #define FREE_BLOCK_SUCC(bp) ((char *)(bp) + WSIZE)
 
+static void *extend_heap(size_t double_words);
+static void *get_segregated_free_list_index(size_t size);
+static void insert_to_free_list(void *bp);
+static void remove_from_free_list(void *bp);
+static void *coalesce(void *bp);
+static void *find_fit(size_t size);
+static void place(void *bp, size_t asize);
+static void place_realloc(void *bp, size_t asize);
+static void *coalesce_realloc(void *bp, size_t new_size);
+
 static char *heap_listp;
 static char *free_list_pointer;
 
@@ -99,6 +109,9 @@ static void *extend_heap(size_t double_words)
     return coalesce(bp);
 }
 
+/*
+ * get_segregated_free_list_index - given `size`, return apporatiate free list index
+ */
 static void *get_segregated_free_list_index(size_t size)
 {
     unsigned int i = 0;
@@ -115,7 +128,10 @@ static void *get_segregated_free_list_index(size_t size)
     return free_list_pointer + i * WSIZE;
 }
 
-static void *insert_to_free_list(char *bp)
+/*
+ * insert_to_free_list - insert given block to free list
+ */
+static void insert_to_free_list(void *bp)
 {
     char *root_pointer = get_segregated_free_list_index(GET_SIZE(HDRP(bp)));
     char *prev_free_block = root_pointer;
@@ -145,7 +161,10 @@ static void *insert_to_free_list(char *bp)
     }
 }
 
-static void *remove_from_free_list(char *bp)
+/*
+ * remove_from_free_list - remove given free block from free list
+ */
+static void remove_from_free_list(void *bp)
 {
     char *root_pointer = get_segregated_free_list_index(GET_SIZE(HDRP(bp)));
     char *prev_free_block = GET(FREE_BLOCK_PRED(bp));
@@ -204,6 +223,10 @@ static void *coalesce(void *bp)
     return bp;
 }
 
+/*
+ * find_fit - find apporatiate free block to place, if none return NULL
+ *  using first fit (since the free list are ordered, this is the same as best fit)
+ */
 static void *find_fit(size_t size)
 {
     char *root_pointer;
@@ -217,6 +240,9 @@ static void *find_fit(size_t size)
     return NULL;
 }
 
+/*
+ * place
+ */
 static void place(void *bp, size_t asize)
 {
     size_t csize = GET_SIZE(HDRP(bp));
@@ -240,9 +266,150 @@ static void place(void *bp, size_t asize)
     }
 }
 
-static void *coalesce_realloc()
+/*
+ * place_realloc
+ */
+static void place_realloc(void *bp, size_t asize)
 {
-    // TODO
+    size_t csize = GET_SIZE(HDRP(bp));
+
+    remove_from_free_list(bp);
+
+    // 2 * DSIZE (4 words) are needed for a new free block
+    if ((csize - asize) >= (2 * DSIZE)) {
+        PUT(HDRP(bp), PACK(asize, BLOCK_ALLOCATED));
+        PUT(FTRP(bp), PACK(asize, BLOCK_ALLOCATED));
+        bp = NEXT_BLKP(bp);
+        PUT(HDRP(bp), PACK(csize - asize, BLOCK_FREE));
+        PUT(FTRP(bp), PACK(csize - asize, BLOCK_FREE));
+        PUT(FREE_BLOCK_PRED(bp), NULL);
+        PUT(FREE_BLOCK_SUCC(bp), NULL);
+        coalesce(bp);                   // there might be adjacent free blocks
+    }
+    else {
+        PUT(HDRP(bp), PACK(csize, BLOCK_ALLOCATED));
+        PUT(FTRP(bp), PACK(csize, BLOCK_ALLOCATED));
+    }
+}
+
+/*
+ * coalesce_realloc - if possible, realloc given block using adjacent free blocks
+ */
+static void *coalesce_realloc(void *bp, size_t new_size)
+{
+    size_t orig_size = GET_SIZE(HDRP(bp));
+    size_t max_adj_size;
+
+    int prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+    int next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+
+    if (prev_alloc == BLOCK_ALLOCATED && next_alloc == BLOCK_ALLOCATED) {
+
+    }
+    else if (prev_alloc == BLOCK_ALLOCATED && next_alloc == BLOCK_FREE) {
+        max_adj_size = orig_size + GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        if (max_adj_size + 2 * DSIZE >= new_size) {
+            void *next_bp = NEXT_BLKP(bp);
+            remove_from_free_list(next_bp);
+            PUT(HDRP(next_bp), PACK(new_size - orig_size, BLOCK_ALLOCATED));
+            PUT(FTRP(next_bp), PACK(new_size - orig_size, BLOCK_ALLOCATED));
+            PUT(HDRP(NEXT_BLKP(next_bp)), PACK(max_adj_size - new_size, BLOCK_FREE));
+            PUT(FTRP(NEXT_BLKP(next_bp)), PACK(max_adj_size - new_size, BLOCK_FREE));
+            insert_to_free_list(NEXT_BLKP(next_bp));
+
+            PUT(FTRP(next_bp), PACK(new_size, BLOCK_ALLOCATED));
+            PUT(HDRP(bp), PACK(new_size, BLOCK_ALLOCATED));
+            return bp;
+        }
+        else if (max_adj_size >= new_size) {
+            void *next_bp = NEXT_BLKP(bp);
+            remove_from_free_list(next_bp);
+            PUT(FTRP(next_bp), PACK(max_adj_size, BLOCK_ALLOCATED));
+            PUT(HDRP(bp), PACK(max_adj_size, BLOCK_ALLOCATED));
+            return bp;
+        }
+    }
+    else if (prev_alloc == BLOCK_FREE && next_alloc == BLOCK_ALLOCATED) {
+        max_adj_size = orig_size + GET_SIZE(FTRP(PREV_BLKP(bp)));
+        if (max_adj_size + 2 * DSIZE >= new_size) {
+            void *prev_bp = PREV_BLKP(bp);
+            remove_from_free_list(prev_bp);
+            PUT(FTRP(prev_bp), PACK(new_size - orig_size, BLOCK_ALLOCATED));
+            PUT(HDRP(prev_bp), PACK(new_size - orig_size, BLOCK_ALLOCATED));
+            PUT(FTRP(PREV_BLKP(prev_bp)), PACK(max_adj_size - new_size, BLOCK_FREE));
+            PUT(HDRP(PREV_BLKP(prev_bp)), PACK(max_adj_size - new_size, BLOCK_FREE));
+            // use memmove instead of memcpy to handle the (possible) overlapped area
+            memmove(prev_bp, bp, orig_size - 2);
+            insert_to_free_list(PREV_BLKP(prev_bp));
+
+            PUT(FTRP(prev_bp), PACK(new_size, BLOCK_ALLOCATED));
+            PUT(FTRP(bp), PACK(new_size, BLOCK_ALLOCATED));
+            return prev_bp;
+        }
+        else if (max_adj_size >= new_size) {
+            void *prev_bp = NEXT_BLKP(bp);
+            remove_from_free_list(prev_bp);
+            PUT(HDRP(prev_bp), PACK(max_adj_size, BLOCK_ALLOCATED));
+            PUT(FTRP(bp), PACK(max_adj_size, BLOCK_ALLOCATED));
+            memmove(prev_bp, bp, orig_size - 2);
+            return prev_bp;
+        }
+    }
+    else {
+        max_adj_size = orig_size + GET_SIZE(FTRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        if (max_adj_size >= new_size) {
+            void *next_bp = NEXT_BLKP(bp);
+            size_t size_next = GET_SIZE(HDRP(next_bp));
+            if (size_next + 2 * DSIZE >= new_size - orig_size) {
+                remove_from_free_list(next_bp);
+                PUT(HDRP(next_bp), PACK(new_size - orig_size, BLOCK_ALLOCATED));
+                PUT(FTRP(next_bp), PACK(new_size - orig_size, BLOCK_ALLOCATED));
+                PUT(HDRP(NEXT_BLKP(next_bp)), PACK(size_next + orig_size - new_size, BLOCK_FREE));
+                PUT(FTRP(NEXT_BLKP(next_bp)), PACK(size_next + orig_size - new_size, BLOCK_FREE));
+                insert_to_free_list(NEXT_BLKP(next_bp));
+
+                PUT(FTRP(next_bp), PACK(new_size, BLOCK_ALLOCATED));
+                PUT(HDRP(bp), PACK(new_size, BLOCK_ALLOCATED));
+                return bp;
+            }
+            else if (size_next >= new_size - orig_size) {
+                remove_from_free_list(next_bp);
+                PUT(FTRP(next_bp), PACK(size_next, BLOCK_ALLOCATED));
+                PUT(HDRP(bp), PACK(size_next, BLOCK_ALLOCATED));
+                return bp;
+            }
+            else {
+                remove_from_free_list(next_bp);
+                PUT(HDRP(next_bp), PACK(size_next, BLOCK_ALLOCATED));
+                PUT(FTRP(next_bp), PACK(size_next, BLOCK_ALLOCATED));
+            }
+            size_t size_left = new_size - orig_size - size_next;
+
+            void *prev_bp = PREV_BLKP(bp);
+            size_t size_prev = GET_SIZE(FTRP(prev_bp));
+            if (size_prev + 2 * DSIZE >= size_left) {
+                remove_from_free_list(prev_bp);
+                PUT(FTRP(prev_bp), PACK(size_left, BLOCK_ALLOCATED));
+                PUT(HDRP(prev_bp), PACK(size_left, BLOCK_ALLOCATED));
+                PUT(FTRP(PREV_BLKP(prev_bp)), PACK(size_prev - size_left, BLOCK_FREE));
+                PUT(HDRP(PREV_BLKP(prev_bp)), PACK(size_prev - size_left, BLOCK_FREE));
+                memmove(prev_bp, bp, orig_size - 2);
+                insert_to_free_list(PREV_BLKP(prev_bp));
+
+                PUT(FTRP(next_bp), PACK(new_size, BLOCK_ALLOCATED));
+                PUT(HDRP(prev_bp), PACK(new_size, BLOCK_ALLOCATED));
+                return prev_bp;
+            }
+            else {
+                remove_from_free_list(prev_bp);
+                PUT(FTRP(next_bp), PACK(max_adj_size, BLOCK_ALLOCATED));
+                PUT(HDRP(prev_bp), PACK(max_adj_size, BLOCK_ALLOCATED));
+                memmove(prev_bp, bp, orig_size - 2);
+                return prev_bp;
+            }
+        }
+    }
+    return NULL;
 }
 
 /* 
@@ -268,7 +435,7 @@ int mm_init(void)
     free_list_pointer = heap_listp;
     heap_listp += 10 * WSIZE;
 
-    if (extend_heap(CHUNKSIZE/DSIZE) == NULL) return -1;
+    if (extend_heap(CHUNKSIZE / DSIZE) == NULL) return -1;
     return 0;
 }
 
@@ -278,41 +445,81 @@ int mm_init(void)
  */
 void *mm_malloc(size_t size)
 {
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
-	return NULL;
-    else {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
+    size_t asize;
+    size_t extendsize;
+    char *bp;
+
+    if (size == 0 ) return NULL;
+
+    // adjust block size to include overhead and alignment requirements
+    if (size <= DSIZE) asize = 2 * DSIZE;
+    // minimum allocated block size is 4 words (alignment requirement)
+    else asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+
+    if ((bp = find_fit(asize)) != NULL) {
+        place(bp, asize);
+        return bp;
     }
+
+    extendsize = MAX(asize, CHUNKSIZE);
+    if ((bp = extend_heap(extendsize / DSIZE)) == NULL)
+        return NULL;
+
+    place(bp, asize);
+    return bp;
 }
 
 /*
  * mm_free - Freeing a block does nothing.
  */
-void mm_free(void *ptr)
+void mm_free(void *bp)
 {
+    size_t size = GET_SIZE(HDRP(bp));
+    PUT(HDRP(bp), PACK(size, BLOCK_FREE));
+    PUT(FTRP(bp), PACK(size, BLOCK_FREE));
+    coalesce(bp);
+    // coalesce adjacent free blocks, and insert to free list.
 }
 
 /*
  * mm_realloc - Implemented simply in terms of mm_malloc and mm_free
  */
-void *mm_realloc(void *ptr, size_t size)
+void *mm_realloc(void *bp, size_t size)
 {
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-    
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-      return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-      copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
+    // if bp is NULL, equivalent to mm_malloc
+    if (bp == NULL) return mm_malloc(size);
+    // if size is 0, equivalent to mm_free
+    if (size == 0) {
+        mm_free(bp);
+        return NULL;
+    }
+
+    size_t asize;
+
+    // adjust block size to include overhead and alignment requirements
+    if (size <= DSIZE) asize = 2 * DSIZE;
+        // minimum allocated block size is 4 words (alignment requirement)
+    else asize = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
+
+
+    size_t orig_size = GET_SIZE(HDRP(bp));
+
+    if (orig_size == asize) return bp;
+
+    if (orig_size > asize) {
+        place_realloc(bp, asize);
+        return bp;
+    }
+
+    char *new_bp = coalesce_realloc(bp, asize);
+
+    if (new_bp != NULL) return new_bp;
+    else {
+        new_bp = mm_malloc(size);
+        memcpy(new_bp, bp, orig_size - 2);
+        mm_free(bp);
+        return new_bp;
+    }
 }
 
 
