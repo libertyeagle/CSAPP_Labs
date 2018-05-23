@@ -305,8 +305,8 @@ static void *coalesce_realloc(void *bp, size_t new_size)
     size_t orig_size = GET_SIZE(HDRP(bp));
     size_t max_adj_size;
 
-    int prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
-    int next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
+    unsigned int prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
+    unsigned int next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
 
     if (prev_alloc == BLOCK_ALLOCATED && next_alloc == BLOCK_ALLOCATED) {
 
@@ -531,17 +531,3 @@ void *mm_realloc(void *bp, size_t size)
         return new_bp;
     }
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
